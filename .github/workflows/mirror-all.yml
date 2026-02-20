@@ -24,90 +24,90 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-import json, os, sys, urllib.request
+          import json, os, sys, urllib.request
 
-api='https://api.notion.com/v1'
-key=os.environ.get('NOTION_API_KEY','')
-db_id=os.environ.get('NOTION_DB_ID','')
-src_owner=os.environ.get('DEFAULT_SOURCE_OWNER','ThePipis')
-dst_owner=os.environ.get('DEFAULT_DEST_OWNER','kaimirroring-org')
+          api='https://api.notion.com/v1'
+          key=os.environ.get('NOTION_API_KEY','')
+          db_id=os.environ.get('NOTION_DB_ID','')
+          src_owner=os.environ.get('DEFAULT_SOURCE_OWNER','ThePipis')
+          dst_owner=os.environ.get('DEFAULT_DEST_OWNER','kaimirroring-org')
 
-if not key or not db_id:
-  print('Missing NOTION_API_KEY or NOTION_MIRROR_DB_ID', file=sys.stderr)
-  sys.exit(1)
+          if not key or not db_id:
+            print('Missing NOTION_API_KEY or NOTION_MIRROR_DB_ID', file=sys.stderr)
+            sys.exit(1)
 
-def req(method, url, body=None):
-  headers={
-    'Authorization': f'Bearer {key}',
-    'Notion-Version': '2025-09-03',
-    'Content-Type': 'application/json',
-  }
-  data=json.dumps(body).encode() if body is not None else None
-  r=urllib.request.Request(url, data=data, headers=headers, method=method)
-  with urllib.request.urlopen(r) as resp:
-    return json.loads(resp.read().decode())
+          def req(method, url, body=None):
+            headers={
+              'Authorization': f'Bearer {key}',
+              'Notion-Version': '2025-09-03',
+              'Content-Type': 'application/json',
+            }
+            data=json.dumps(body).encode() if body is not None else None
+            r=urllib.request.Request(url, data=data, headers=headers, method=method)
+            with urllib.request.urlopen(r) as resp:
+              return json.loads(resp.read().decode())
 
-db=req('GET', f'{api}/databases/{db_id}')
-ds=(db.get('data_sources') or [{}])[0].get('id')
-if not ds:
-  print('No data_source linked to database', file=sys.stderr)
-  sys.exit(1)
+          db=req('GET', f'{api}/databases/{db_id}')
+          ds=(db.get('data_sources') or [{}])[0].get('id')
+          if not ds:
+            print('No data_source linked to database', file=sys.stderr)
+            sys.exit(1)
 
-rows=[]
-start=None
-while True:
-  body={
-    'filter': {'property':'Mirror Enabled','checkbox': {'equals': True}},
-    'page_size': 100,
-  }
-  if start:
-    body['start_cursor']=start
-  q=req('POST', f'{api}/data_sources/{ds}/query', body)
-  rows.extend(q.get('results', []))
-  if not q.get('has_more'):
-    break
-  start=q.get('next_cursor')
+          rows=[]
+          start=None
+          while True:
+            body={
+              'filter': {'property':'Mirror Enabled','checkbox': {'equals': True}},
+              'page_size': 100,
+            }
+            if start:
+              body['start_cursor']=start
+            q=req('POST', f'{api}/data_sources/{ds}/query', body)
+            rows.extend(q.get('results', []))
+            if not q.get('has_more'):
+              break
+            start=q.get('next_cursor')
 
-out=[]
-for r in rows:
-  p=r.get('properties', {})
-  name=p.get('Name', {}).get('title', [])
-  source=(name[0].get('plain_text','').strip() if name else '').strip()
-  if not source:
-    continue
-  if '/' not in source:
-    source=f'{src_owner}/{source}'
+          out=[]
+          for r in rows:
+            p=r.get('properties', {})
+            name=p.get('Name', {}).get('title', [])
+            source=(name[0].get('plain_text','').strip() if name else '').strip()
+            if not source:
+              continue
+            if '/' not in source:
+              source=f'{src_owner}/{source}'
 
-  mirror_rich=p.get('Repo Mirror', {}).get('rich_text', [])
-  mirror=(mirror_rich[0].get('plain_text','').strip() if mirror_rich else '').strip()
-  if mirror:
-    if '/' not in mirror:
-      mirror=f'{dst_owner}/{mirror}'
-    dest=mirror
-  else:
-    repo_name=source.split('/',1)[1]
-    dest=f'{dst_owner}/{repo_name}-mirror'
+            mirror_rich=p.get('Repo Mirror', {}).get('rich_text', [])
+            mirror=(mirror_rich[0].get('plain_text','').strip() if mirror_rich else '').strip()
+            if mirror:
+              if '/' not in mirror:
+                mirror=f'{dst_owner}/{mirror}'
+              dest=mirror
+            else:
+              repo_name=source.split('/',1)[1]
+              dest=f'{dst_owner}/{repo_name}-mirror'
 
-  status=p.get('Status',{}).get('select',{}).get('name','')
-  if status == 'Paused':
-    continue
+            status=p.get('Status',{}).get('select',{}).get('name','')
+            if status == 'Paused':
+              continue
 
-  out.append({'source_repo': source, 'dest_repo': dest})
+            out.append({'source_repo': source, 'dest_repo': dest})
 
-# dedupe
-seen=set(); final=[]
-for x in out:
-  k=(x['source_repo'], x['dest_repo'])
-  if k in seen: continue
-  seen.add(k)
-  final.append(x)
+          seen=set(); final=[]
+          for x in out:
+            k=(x['source_repo'], x['dest_repo'])
+            if k in seen:
+              continue
+            seen.add(k)
+            final.append(x)
 
-with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-  f.write('repos<<EOF\n')
-  f.write(json.dumps(final))
-  f.write('\nEOF\n')
-print('Discovered', len(final), 'repos')
-PY
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write('repos<<EOF\\n')
+            f.write(json.dumps(final))
+            f.write('\\nEOF\\n')
+          print('Discovered', len(final), 'repos')
+          PY
 
   mirror:
     needs: discover
@@ -165,12 +165,10 @@ PY
           DST_TOKEN: ${{ steps.dst_token.outputs.token }}
           SOURCE_REPO: ${{ matrix.repo.source_repo }}
           DEST_REPO: ${{ matrix.repo.dest_repo }}
-          SOURCE_REPO: ${{ matrix.repo.source_repo }}
         run: |
           set -euo pipefail
           git clone --mirror "https://x-access-token:${SRC_TOKEN}@github.com/${SOURCE_REPO}.git" source.git
           cd source.git
-          # GitHub rejects hidden refs/pull/*
           for ref in $(git for-each-ref --format='%(refname)' refs/pull); do
             git update-ref -d "$ref"
           done
