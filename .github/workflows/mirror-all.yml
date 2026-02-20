@@ -177,19 +177,21 @@ jobs:
 
       - name: Update Notion status + last sync
         if: ${{ success() }}
+        continue-on-error: true
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           PAGE_ID: ${{ matrix.repo.page_id }}
+          RUN_STARTED_AT: ${{ github.run_started_at }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, os, urllib.request
+          import json, os, urllib.request, urllib.error
           key=os.environ['NOTION_API_KEY']
           page_id=os.environ['PAGE_ID']
           body={
             'properties': {
               'Status': {'select': {'name': 'Active'}},
-              'Last Sync': {'date': {'start': '${{ github.run_started_at }}'}},
+              'Last Sync': {'date': {'start': os.environ['RUN_STARTED_AT']}},
             }
           }
           req=urllib.request.Request(
@@ -202,7 +204,12 @@ jobs:
               'Content-Type': 'application/json',
             }
           )
-          with urllib.request.urlopen(req):
-            pass
-          print('Notion updated', page_id)
+          try:
+            with urllib.request.urlopen(req) as r:
+              _ = r.read()
+            print('Notion updated', page_id)
+          except urllib.error.HTTPError as e:
+            body = e.read().decode('utf-8', 'ignore')
+            print('Notion update failed', e.code, body)
+            raise
           PY
