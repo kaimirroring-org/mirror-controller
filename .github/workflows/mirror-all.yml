@@ -1,0 +1,48 @@
+name: Mirror selected repos
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: ["OpenClaw", "fiestapp"]
+    steps:
+      - name: Create source token (ThePipis)
+        id: src_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.MIRROR_APP_ID }}
+          private-key: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
+          owner: ThePipis
+
+      - name: Create destination token (kaimirroring-org)
+        id: dst_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.MIRROR_APP_ID }}
+          private-key: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
+          owner: kaimirroring-org
+
+      - name: Mirror repo
+        env:
+          SRC_TOKEN: ${{ steps.src_token.outputs.token }}
+          DST_TOKEN: ${{ steps.dst_token.outputs.token }}
+          SRC_REPO: ThePipis/${{ matrix.repo }}
+          DST_REPO: kaimirroring-org/${{ matrix.repo }}-mirror
+        run: |
+          set -euo pipefail
+          git clone --mirror "https://x-access-token:${SRC_TOKEN}@github.com/${SRC_REPO}.git" source.git
+          cd source.git
+          for ref in $(git for-each-ref --format='%(refname)' refs/pull); do
+            git update-ref -d "$ref"
+          done
+          git push --mirror "https://x-access-token:${DST_TOKEN}@github.com/${DST_REPO}.git"
