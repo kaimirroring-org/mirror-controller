@@ -102,10 +102,11 @@ jobs:
             seen.add(k)
             final.append(x)
 
+          delim='DELIM_MIRROR_REPOS'
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-            f.write('repos<<EOF\\n')
-            f.write(json.dumps(final))
-            f.write('\\nEOF\\n')
+            f.write(f'repos<<{delim}\n')
+            f.write(json.dumps(final) + '\n')
+            f.write(f'{delim}\n')
           print('Discovered', len(final), 'repos')
           PY
 
