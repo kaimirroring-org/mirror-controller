@@ -176,6 +176,7 @@ jobs:
           git push --mirror "https://x-access-token:${DST_TOKEN}@github.com/${DEST_REPO}.git"
 
       - name: Update Notion status + last sync
+        id: notion_update
         if: ${{ success() }}
         continue-on-error: true
         env:
@@ -213,3 +214,60 @@ jobs:
             print('Notion update failed', e.code, body)
             raise
           PY
+
+
+      - name: Update Notion status on mirror failure
+        if: ${{ failure() }}
+        continue-on-error: true
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          PAGE_ID: ${{ matrix.repo.page_id }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, urllib.request
+          key=os.environ['NOTION_API_KEY']
+          page_id=os.environ['PAGE_ID']
+          run_url=os.environ['RUN_URL']
+          body={
+            'properties': {
+              'Status': {'select': {'name': 'Error'}},
+              'Notes': {'rich_text': [{'text': {'content': f'Mirror failed. Run: {run_url}'}}]},
+            }
+          }
+          req=urllib.request.Request(
+            f'https://api.notion.com/v1/pages/{page_id}',
+            data=json.dumps(body).encode(),
+            method='PATCH',
+            headers={
+              'Authorization': f'Bearer {key}',
+              'Notion-Version': '2025-09-03',
+              'Content-Type': 'application/json',
+            }
+          )
+          with urllib.request.urlopen(req):
+            pass
+          print('Notion marked Error', page_id)
+          PY
+
+      - name: Alert if Notion update failed (optional webhooks)
+        if: ${{ steps.notion_update.outcome == 'failure' }}
+        continue-on-error: true
+        env:
+          REPO_PAIR: ${{ matrix.repo.source_repo }} -> ${{ matrix.repo.dest_repo }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.ALERT_DISCORD_WEBHOOK_URL }}
+          WHATSAPP_WEBHOOK_URL: ${{ secrets.ALERT_WHATSAPP_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          msg="⚠️ Mirror OK pero falló update Notion: ${REPO_PAIR}. Run: ${RUN_URL}"
+          echo "::warning::${msg}"
+
+          if [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
+            curl -sS -X POST "$DISCORD_WEBHOOK_URL"               -H 'Content-Type: application/json'               -d "{"content":"${msg}"}" >/dev/null || true
+          fi
+
+          if [ -n "${WHATSAPP_WEBHOOK_URL:-}" ]; then
+            curl -sS -X POST "$WHATSAPP_WEBHOOK_URL"               -H 'Content-Type: application/json'               -d "{"text":"${msg}"}" >/dev/null || true
+          fi
