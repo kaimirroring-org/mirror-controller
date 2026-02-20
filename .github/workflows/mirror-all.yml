@@ -14,7 +14,7 @@ jobs:
     outputs:
       repos: ${{ steps.discover.outputs.repos }}
     steps:
-      - name: Build mirror list from Notion
+      - name: Build mirror list from Notion (+sync paused status)
         id: discover
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
@@ -56,10 +56,7 @@ jobs:
           rows=[]
           start=None
           while True:
-            body={
-              'filter': {'property':'Mirror Enabled','checkbox': {'equals': True}},
-              'page_size': 100,
-            }
+            body={'page_size': 100}
             if start:
               body['start_cursor']=start
             q=req('POST', f'{api}/data_sources/{ds}/query', body)
@@ -71,12 +68,16 @@ jobs:
           out=[]
           for r in rows:
             p=r.get('properties', {})
+            page_id=r.get('id')
             name=p.get('Name', {}).get('title', [])
             source=(name[0].get('plain_text','').strip() if name else '').strip()
             if not source:
               continue
             if '/' not in source:
               source=f'{src_owner}/{source}'
+
+            enabled=bool(p.get('Mirror Enabled', {}).get('checkbox', False))
+            status=p.get('Status',{}).get('select',{}).get('name','')
 
             mirror_rich=p.get('Repo Mirror', {}).get('rich_text', [])
             mirror=(mirror_rich[0].get('plain_text','').strip() if mirror_rich else '').strip()
@@ -88,26 +89,25 @@ jobs:
               repo_name=source.split('/',1)[1]
               dest=f'{dst_owner}/{repo_name}-mirror'
 
-            status=p.get('Status',{}).get('select',{}).get('name','')
-            if status == 'Paused':
-              continue
+            # Auto-maintain Paused when checkbox is off
+            if not enabled and status != 'Paused':
+              req('PATCH', f'{api}/pages/{page_id}', {
+                'properties': {
+                  'Status': {'select': {'name': 'Paused'}},
+                }
+              })
 
-            out.append({'source_repo': source, 'dest_repo': dest})
+            out.append({'page_id': page_id, 'source_repo': source, 'dest_repo': dest, 'enabled': enabled})
 
-          seen=set(); final=[]
-          for x in out:
-            k=(x['source_repo'], x['dest_repo'])
-            if k in seen:
-              continue
-            seen.add(k)
-            final.append(x)
+          # only enabled entries go to mirror matrix
+          final=[x for x in out if x['enabled']]
 
           delim='DELIM_MIRROR_REPOS'
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
             f.write(f'repos<<{delim}\n')
             f.write(json.dumps(final) + '\n')
             f.write(f'{delim}\n')
-          print('Discovered', len(final), 'repos')
+          print('Discovered enabled repos:', len(final))
           PY
 
   mirror:
@@ -174,3 +174,35 @@ jobs:
             git update-ref -d "$ref"
           done
           git push --mirror "https://x-access-token:${DST_TOKEN}@github.com/${DEST_REPO}.git"
+
+      - name: Update Notion status + last sync
+        if: ${{ success() }}
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          PAGE_ID: ${{ matrix.repo.page_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, urllib.request
+          key=os.environ['NOTION_API_KEY']
+          page_id=os.environ['PAGE_ID']
+          body={
+            'properties': {
+              'Status': {'select': {'name': 'Active'}},
+              'Last Sync': {'date': {'start': '${{ github.run_started_at }}'}},
+            }
+          }
+          req=urllib.request.Request(
+            f'https://api.notion.com/v1/pages/{page_id}',
+            data=json.dumps(body).encode(),
+            method='PATCH',
+            headers={
+              'Authorization': f'Bearer {key}',
+              'Notion-Version': '2025-09-03',
+              'Content-Type': 'application/json',
+            }
+          )
+          with urllib.request.urlopen(req):
+            pass
+          print('Notion updated', page_id)
+          PY
