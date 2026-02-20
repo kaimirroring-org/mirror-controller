@@ -1,4 +1,4 @@
-name: Mirror selected repos
+name: Mirror from Notion control table
 
 on:
   schedule:
@@ -9,12 +9,114 @@ permissions:
   contents: read
 
 jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      repos: ${{ steps.discover.outputs.repos }}
+    steps:
+      - name: Build mirror list from Notion
+        id: discover
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DB_ID: ${{ secrets.NOTION_MIRROR_DB_ID }}
+          DEFAULT_SOURCE_OWNER: ThePipis
+          DEFAULT_DEST_OWNER: kaimirroring-org
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+import json, os, sys, urllib.request
+
+api='https://api.notion.com/v1'
+key=os.environ.get('NOTION_API_KEY','')
+db_id=os.environ.get('NOTION_DB_ID','')
+src_owner=os.environ.get('DEFAULT_SOURCE_OWNER','ThePipis')
+dst_owner=os.environ.get('DEFAULT_DEST_OWNER','kaimirroring-org')
+
+if not key or not db_id:
+  print('Missing NOTION_API_KEY or NOTION_MIRROR_DB_ID', file=sys.stderr)
+  sys.exit(1)
+
+def req(method, url, body=None):
+  headers={
+    'Authorization': f'Bearer {key}',
+    'Notion-Version': '2025-09-03',
+    'Content-Type': 'application/json',
+  }
+  data=json.dumps(body).encode() if body is not None else None
+  r=urllib.request.Request(url, data=data, headers=headers, method=method)
+  with urllib.request.urlopen(r) as resp:
+    return json.loads(resp.read().decode())
+
+db=req('GET', f'{api}/databases/{db_id}')
+ds=(db.get('data_sources') or [{}])[0].get('id')
+if not ds:
+  print('No data_source linked to database', file=sys.stderr)
+  sys.exit(1)
+
+rows=[]
+start=None
+while True:
+  body={
+    'filter': {'property':'Mirror Enabled','checkbox': {'equals': True}},
+    'page_size': 100,
+  }
+  if start:
+    body['start_cursor']=start
+  q=req('POST', f'{api}/data_sources/{ds}/query', body)
+  rows.extend(q.get('results', []))
+  if not q.get('has_more'):
+    break
+  start=q.get('next_cursor')
+
+out=[]
+for r in rows:
+  p=r.get('properties', {})
+  name=p.get('Name', {}).get('title', [])
+  source=(name[0].get('plain_text','').strip() if name else '').strip()
+  if not source:
+    continue
+  if '/' not in source:
+    source=f'{src_owner}/{source}'
+
+  mirror_rich=p.get('Repo Mirror', {}).get('rich_text', [])
+  mirror=(mirror_rich[0].get('plain_text','').strip() if mirror_rich else '').strip()
+  if mirror:
+    if '/' not in mirror:
+      mirror=f'{dst_owner}/{mirror}'
+    dest=mirror
+  else:
+    repo_name=source.split('/',1)[1]
+    dest=f'{dst_owner}/{repo_name}-mirror'
+
+  status=p.get('Status',{}).get('select',{}).get('name','')
+  if status == 'Paused':
+    continue
+
+  out.append({'source_repo': source, 'dest_repo': dest})
+
+# dedupe
+seen=set(); final=[]
+for x in out:
+  k=(x['source_repo'], x['dest_repo'])
+  if k in seen: continue
+  seen.add(k)
+  final.append(x)
+
+with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+  f.write('repos<<EOF\n')
+  f.write(json.dumps(final))
+  f.write('\nEOF\n')
+print('Discovered', len(final), 'repos')
+PY
+
   mirror:
+    needs: discover
+    if: ${{ needs.discover.outputs.repos != '[]' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        repo: ["OpenClaw", "fiestapp"]
+        repo: ${{ fromJson(needs.discover.outputs.repos) }}
     steps:
       - name: Create source token (ThePipis)
         id: src_token
@@ -32,17 +134,42 @@ jobs:
           private-key: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
           owner: kaimirroring-org
 
-      - name: Mirror repo
+      - name: Ensure destination repository exists
+        env:
+          DST_TOKEN: ${{ steps.dst_token.outputs.token }}
+          DEST_REPO: ${{ matrix.repo.dest_repo }}
+        run: |
+          set -euo pipefail
+          owner="${DEST_REPO%%/*}"
+          repo="${DEST_REPO##*/}"
+          code=$(curl -sS -o /tmp/repo_check.json -w '%{http_code}' \
+            -H "Authorization: Bearer ${DST_TOKEN}" -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/${owner}/${repo}")
+          if [ "$code" = "200" ]; then
+            echo "Destination exists: ${DEST_REPO}"
+          elif [ "$code" = "404" ]; then
+            curl -sS -X POST "https://api.github.com/orgs/${owner}/repos" \
+              -H "Authorization: Bearer ${DST_TOKEN}" -H 'Accept: application/vnd.github+json' \
+              -d "{\"name\":\"${repo}\",\"private\":false,\"description\":\"Mirror of ${SOURCE_REPO}\"}" > /tmp/create_repo.json
+            echo "Created destination: ${DEST_REPO}"
+          else
+            echo "Failed checking destination repo (${code})"
+            cat /tmp/repo_check.json
+            exit 1
+          fi
+
+      - name: Mirror source -> destination
         env:
           SRC_TOKEN: ${{ steps.src_token.outputs.token }}
           DST_TOKEN: ${{ steps.dst_token.outputs.token }}
-          SRC_REPO: ThePipis/${{ matrix.repo }}
-          DST_REPO: kaimirroring-org/${{ matrix.repo }}-mirror
+          SOURCE_REPO: ${{ matrix.repo.source_repo }}
+          DEST_REPO: ${{ matrix.repo.dest_repo }}
         run: |
           set -euo pipefail
-          git clone --mirror "https://x-access-token:${SRC_TOKEN}@github.com/${SRC_REPO}.git" source.git
+          git clone --mirror "https://x-access-token:${SRC_TOKEN}@github.com/${SOURCE_REPO}.git" source.git
           cd source.git
+          # GitHub rejects hidden refs/pull/*
           for ref in $(git for-each-ref --format='%(refname)' refs/pull); do
             git update-ref -d "$ref"
           done
-          git push --mirror "https://x-access-token:${DST_TOKEN}@github.com/${DST_REPO}.git"
+          git push --mirror "https://x-access-token:${DST_TOKEN}@github.com/${DEST_REPO}.git"
