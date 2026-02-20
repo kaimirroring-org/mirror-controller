@@ -138,6 +138,7 @@ PY
         env:
           DST_TOKEN: ${{ steps.dst_token.outputs.token }}
           DEST_REPO: ${{ matrix.repo.dest_repo }}
+          SOURCE_REPO: ${{ matrix.repo.source_repo }}
         run: |
           set -euo pipefail
           owner="${DEST_REPO%%/*}"
@@ -164,6 +165,7 @@ PY
           DST_TOKEN: ${{ steps.dst_token.outputs.token }}
           SOURCE_REPO: ${{ matrix.repo.source_repo }}
           DEST_REPO: ${{ matrix.repo.dest_repo }}
+          SOURCE_REPO: ${{ matrix.repo.source_repo }}
         run: |
           set -euo pipefail
           git clone --mirror "https://x-access-token:${SRC_TOKEN}@github.com/${SOURCE_REPO}.git" source.git
